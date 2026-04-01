@@ -1,6 +1,6 @@
-# Ford-Fulkerson Algorithm Visualizer
+# Network Flow Sandbox
 
-An interactive visualization of the Ford-Fulkerson max-flow algorithm built with React, TypeScript, D3, and Vite. Build flow networks on a dark, IDE-style canvas and step through the algorithm to see augmenting paths, residual graphs, and min-cuts in action.
+An interactive visualization Network Flow and max-flow algorithms built with React, TypeScript, D3, and Vite. Build flow networks on a dynamic canvas. Check flow conditions, analyze cuts, and run the Ford Fulkerson algorithm.
 
 ---
 <img width="800" alt="Screenshot 2026-04-01 at 10 27 37 AM" src="https://github.com/user-attachments/assets/7ce3ea03-59a4-490c-a3c7-dfeaade8534a" />

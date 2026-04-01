@@ -2,6 +2,7 @@ import { Graph } from './graph';
 
 export type CanvasMode = 'select' | 'edge' | 'cut';
 export type ViewLens = 'clean' | 'validation';
+export type EdgeLabelMode = 'full' | 'flow';
 
 export interface Cut {
   id: string;

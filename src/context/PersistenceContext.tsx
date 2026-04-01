@@ -6,6 +6,8 @@ import {
   saveGraphToStorage,
   deleteSavedFromStorage,
   generateThumbnail,
+  exportSavedGraphs,
+  importSavedGraphs,
 } from '../services/persistence';
 
 interface PersistenceContextValue {
@@ -13,6 +15,8 @@ interface PersistenceContextValue {
   saveGraph: (graph: Graph) => void;
   deleteSaved: (id: string) => void;
   renameSaved: (id: string, name: string) => void;
+  exportAll: () => void;
+  importFromFile: (file: File) => Promise<void>;
 }
 
 const PersistenceCtx = createContext<PersistenceContextValue | null>(null);
@@ -56,8 +60,20 @@ export function PersistenceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const exportAll = useCallback(() => {
+    exportSavedGraphs(savedGraphs);
+  }, [savedGraphs]);
+
+  const importFromFile = useCallback(async (file: File) => {
+    const imported = await importSavedGraphs(file);
+    for (const sg of imported) {
+      saveGraphToStorage(sg);
+    }
+    setSavedGraphs(loadAllSaved());
+  }, []);
+
   return (
-    <PersistenceCtx.Provider value={{ savedGraphs, saveGraph, deleteSaved, renameSaved }}>
+    <PersistenceCtx.Provider value={{ savedGraphs, saveGraph, deleteSaved, renameSaved, exportAll, importFromFile }}>
       {children}
     </PersistenceCtx.Provider>
   );

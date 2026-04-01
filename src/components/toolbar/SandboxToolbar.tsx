@@ -16,7 +16,7 @@ const lenses: { lens: ViewLens; label: string }[] = [
 ];
 
 export default function SandboxToolbar() {
-  const { state, setCanvasMode, setViewLens, addGraph } = useSandbox();
+  const { state, setCanvasMode, setViewLens, setEdgeLabelMode, addGraph } = useSandbox();
   const { graph } = useActiveGraph();
   const { saveGraph } = usePersistence();
   const {
@@ -81,6 +81,22 @@ export default function SandboxToolbar() {
             {l.label}
           </button>
         ))}
+      </div>
+
+      <div style={{ width: 1, height: 20, background: COLORS.border }} />
+
+      {/* Edge label mode */}
+      <div style={{ display: 'flex', gap: 2 }}>
+        <button style={btnStyle(state.edgeLabelMode === 'full')}
+          onClick={() => setEdgeLabelMode('full')}
+          title="Show flow / capacity on edges">
+          f/c
+        </button>
+        <button style={btnStyle(state.edgeLabelMode === 'flow')}
+          onClick={() => setEdgeLabelMode('flow')}
+          title="Show flow only (hover for capacity)">
+          f
+        </button>
       </div>
 
       <div style={{ width: 1, height: 20, background: COLORS.border }} />

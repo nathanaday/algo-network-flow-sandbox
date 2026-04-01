@@ -30,6 +30,37 @@ export function deleteSavedFromStorage(id: string): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(all));
 }
 
+export function exportSavedGraphs(graphs: SavedGraph[]): void {
+  const json = JSON.stringify(graphs, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'saved-graphs.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function importSavedGraphs(file: File): Promise<SavedGraph[]> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        if (!Array.isArray(parsed)) {
+          reject(new Error('Expected an array of saved graphs'));
+          return;
+        }
+        resolve(parsed as SavedGraph[]);
+      } catch {
+        reject(new Error('Invalid JSON file'));
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsText(file);
+  });
+}
+
 export function generateThumbnail(graph: Graph, width = 160, height = 100): string {
   if (graph.nodes.length === 0) {
     return `data:image/svg+xml;base64,${btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="${width}" height="${height}" fill="${COLORS.surface}"/></svg>`)}`;

@@ -49,12 +49,14 @@ export default function SandboxCanvas() {
   const [cutDraft, setCutDraft] = useState<CutDraft | null>(null);
   const [selectionBox, setSelectionBox] = useState<SelectionBox | null>(null);
   const [selectedNodes, setSelectedNodes] = useState<Set<string>>(new Set());
+  const [selectedGraphId, setSelectedGraphId] = useState<string | null>(null);
   const [hoveredNode, setHoveredNode] = useState<{ graphId: string; nodeId: string } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [editingLabel, setEditingLabel] = useState<{ graphId: string; nodeId: string } | null>(null);
-  const [editingEdge, setEditingEdge] = useState<{ graphId: string; edgeId: string; field: 'capacity' | 'flow' } | null>(null);
+  const [editingEdge, setEditingEdge] = useState<{ graphId: string; edgeId: string } | null>(null);
   const [editValue, setEditValue] = useState('');
+  const [hoveredEdge, setHoveredEdge] = useState<{ graphId: string; edgeId: string } | null>(null);
   const isDraggingNode = useRef(false);
 
   const {
@@ -215,23 +217,52 @@ export default function SandboxCanvas() {
       return { type: 'line' as const, sx, sy, tx, ty };
     }
 
+    // Bidirectional: use curved arcs with enough separation to be clearly distinct.
+    // Each direction curves to a different side of the straight line.
+    // IMPORTANT: Always compute the perpendicular from a canonical direction
+    // (smaller node id -> larger node id) so both edges share the same
+    // reference frame. Then flip the offset sign based on edge direction.
+    const canonicalForward = edge.source < edge.target;
+    const cdx = canonicalForward ? (tx - sx) : (sx - tx);
+    const cdy = canonicalForward ? (ty - sy) : (sy - ty);
+    const len = Math.sqrt(cdx * cdx + cdy * cdy) || 1;
+    // Perpendicular normal (consistent for both directions)
+    const nx = -cdy / len;
+    const ny = cdx / len;
+
+    // Forward edge (source < target) curves to +side, reverse to -side
+    const direction = canonicalForward ? 1 : -1;
+    // Scale offset with distance but keep it visually significant
+    const offset = Math.max(35, len * 0.2) * direction;
+
     const mx = (sx + tx) / 2;
     const my = (sy + ty) / 2;
-    const dx = tx - sx;
-    const dy = ty - sy;
-    const len = Math.sqrt(dx * dx + dy * dy) || 1;
-    const nx = -dy / len;
-    const ny = dx / len;
+    const cx = mx + nx * offset;
+    const cy = my + ny * offset;
 
-    const direction = edge.source < edge.target ? 1 : -1;
-    const offset = 20 * direction;
+    // Shorten start/end to the node circle boundary so the arrow sits on the edge.
+    // For a quadratic bezier, the tangent at t=0 points from P0 toward the control point,
+    // and the tangent at t=1 points from the control point toward P2.
+    // Walk along the start tangent by NODE_RADIUS to get the trimmed start point.
+    const startDx = cx - sx;
+    const startDy = cy - sy;
+    const startLen = Math.sqrt(startDx * startDx + startDy * startDy) || 1;
+    const ax = sx + (startDx / startLen) * NODE_RADIUS;
+    const ay = sy + (startDy / startLen) * NODE_RADIUS;
+
+    // Walk backward along the end tangent by NODE_RADIUS for the trimmed end point.
+    const endDx = cx - tx;
+    const endDy = cy - ty;
+    const endLen = Math.sqrt(endDx * endDx + endDy * endDy) || 1;
+    const bx = tx + (endDx / endLen) * NODE_RADIUS;
+    const by = ty + (endDy / endLen) * NODE_RADIUS;
 
     return {
       type: 'curve' as const,
-      sx, sy, tx, ty,
-      cx: mx + nx * offset,
-      cy: my + ny * offset,
-    };
+      sx: ax, sy: ay, tx: bx, ty: by,
+      cx, cy,
+      origSx: sx, origSy: sy, origTx: tx, origTy: ty,
+    } as const;
   };
 
   const getEdgeLabelPos = (edge: GraphEdge, graph: Graph) => {
@@ -240,9 +271,12 @@ export default function SandboxCanvas() {
     if (path.type === 'line') {
       return { x: (path.sx + path.tx) / 2, y: (path.sy + path.ty) / 2 };
     }
+    // For curves, place label at the midpoint of the quadratic bezier using original node centers.
+    // Cast to access curve-specific fields.
+    const cp = path as { cx: number; cy: number; origSx: number; origSy: number; origTx: number; origTy: number };
     return {
-      x: (path.sx + 2 * path.cx + path.tx) / 4,
-      y: (path.sy + 2 * path.cy + path.ty) / 4,
+      x: 0.25 * cp.origSx + 0.5 * cp.cx + 0.25 * cp.origTx,
+      y: 0.25 * cp.origSy + 0.5 * cp.cy + 0.25 * cp.origTy,
     };
   };
 
@@ -280,11 +314,11 @@ export default function SandboxCanvas() {
       if (currentStep.highlights.pathEdges?.includes(edge.id)) return COLORS.edgePath;
       const es = currentStep.edgeStates?.[edge.id];
       if (es) {
-        if (es.flow >= es.capacity && es.capacity > 0) return COLORS.edgeFull;
+        if (es.flow > es.capacity) return COLORS.edgeFull;
         if (es.flow > 0) return COLORS.edgeFlow;
       }
     }
-    if (edge.flow > 0 && edge.flow >= edge.capacity && edge.capacity > 0) return COLORS.edgeFull;
+    if (edge.flow > 0 && edge.flow > edge.capacity) return COLORS.edgeFull;
     if (edge.flow > 0) return COLORS.edgeFlow;
     return COLORS.edgeDefault;
   };
@@ -305,6 +339,18 @@ export default function SandboxCanvas() {
       return;
     }
 
+    // Close edge editor popover on click outside
+    if (editingEdge) {
+      setEditingEdge(null);
+    }
+
+    // If edge draft is active (from context menu "New Edge"), clicking on
+    // empty canvas cancels it. Clicking on a node is handled in handleNodeMouseDown.
+    if (edgeDraft) {
+      setEdgeDraft(null);
+      return;
+    }
+
     // Shift+click is for panning (handled by D3 zoom filter)
     if (e.shiftKey) return;
 
@@ -322,7 +368,7 @@ export default function SandboxCanvas() {
         setSelectionBox({ graphId, startX: x, startY: y, endX: x, endY: y });
       }
     }
-  }, [state.canvasMode, state.activeGraphId, screenToSvg, contextMenu]);
+  }, [state.canvasMode, state.activeGraphId, screenToSvg, contextMenu, edgeDraft, editingEdge]);
 
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent) => {
     const { x, y } = screenToSvg(e.clientX, e.clientY);
@@ -359,7 +405,7 @@ export default function SandboxCanvas() {
       if (graph) {
         const target = findNearestNode(edgeDraft.cursorX, edgeDraft.cursorY, edgeDraft.sourceGraphId, edgeDraft.sourceNodeId);
         if (target) {
-          addEdge(edgeDraft.sourceGraphId, edgeDraft.sourceNodeId, target.nodeId, 0);
+          addEdge(edgeDraft.sourceGraphId, edgeDraft.sourceNodeId, target.nodeId, 1);
         }
       }
       setEdgeDraft(null);
@@ -410,9 +456,11 @@ export default function SandboxCanvas() {
             }
           }
           setSelectedNodes(inside);
+          setSelectedGraphId(selectionBox.graphId);
         } else {
           // Tiny box = click on empty space, clear selection
           setSelectedNodes(new Set());
+          setSelectedGraphId(null);
         }
       }
       setSelectionBox(null);
@@ -425,6 +473,23 @@ export default function SandboxCanvas() {
     e.stopPropagation();
     setActiveGraph(graphId);
     setContextMenu(null);
+
+    // If edge draft is active (from context menu "New Edge"), clicking a
+    // target node completes the edge
+    if (edgeDraft) {
+      if (edgeDraft.sourceGraphId === graphId && edgeDraft.sourceNodeId !== nodeId) {
+        // Only create if no duplicate edge exists
+        const graph = state.graphs.find(g => g.id === graphId);
+        const exists = graph?.edges.some(
+          ed => ed.source === edgeDraft.sourceNodeId && ed.target === nodeId
+        );
+        if (!exists) {
+          addEdge(graphId, edgeDraft.sourceNodeId, nodeId, 1);
+        }
+      }
+      setEdgeDraft(null);
+      return;
+    }
 
     // Edge mode: start edge draft
     if (state.canvasMode === 'edge') {
@@ -455,6 +520,7 @@ export default function SandboxCanvas() {
           currentSelection.add(nodeId);
         }
         setSelectedNodes(currentSelection);
+        setSelectedGraphId(graphId);
         return; // Just toggle, don't start drag on shift+click
       } else if (selectedNodes.has(nodeId)) {
         // Already selected, keep selection for group drag
@@ -463,6 +529,7 @@ export default function SandboxCanvas() {
         // Not selected, clear and select only this one
         currentSelection = new Set([nodeId]);
         setSelectedNodes(currentSelection);
+        setSelectedGraphId(graphId);
       }
 
       const startX = e.clientX;
@@ -497,7 +564,7 @@ export default function SandboxCanvas() {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     }
-  }, [state.canvasMode, state.graphs, selectedNodes, setActiveGraph, updateNodePosition]);
+  }, [state.canvasMode, state.graphs, selectedNodes, setActiveGraph, updateNodePosition, edgeDraft, addEdge]);
 
   const handleNodeDoubleClick = useCallback((e: React.MouseEvent, graphId: string, nodeId: string) => {
     e.stopPropagation();
@@ -512,8 +579,7 @@ export default function SandboxCanvas() {
     e.stopPropagation();
     const edge = state.graphs.find(g => g.id === graphId)?.edges.find(ed => ed.id === edgeId);
     if (edge) {
-      setEditingEdge({ graphId, edgeId, field: 'capacity' });
-      setEditValue(String(edge.capacity));
+      setEditingEdge({ graphId, edgeId });
     }
   }, [state.graphs]);
 
@@ -524,19 +590,9 @@ export default function SandboxCanvas() {
     setEditingLabel(null);
   }, [editingLabel, editValue, updateNodeLabel]);
 
-  const commitEdgeEdit = useCallback(() => {
-    if (editingEdge && editValue.trim()) {
-      const num = Number(editValue);
-      if (!isNaN(num)) {
-        if (editingEdge.field === 'capacity') {
-          updateEdgeCapacity(editingEdge.graphId, editingEdge.edgeId, num);
-        } else {
-          updateEdgeFlow(editingEdge.graphId, editingEdge.edgeId, num);
-        }
-      }
-    }
+  const closeEdgeEditor = useCallback(() => {
     setEditingEdge(null);
-  }, [editingEdge, editValue, updateEdgeCapacity, updateEdgeFlow]);
+  }, []);
 
   // ── Context menu ──
 
@@ -576,6 +632,19 @@ export default function SandboxCanvas() {
         }
         break;
       case 'delete': removeNode(graphId, nodeId); break;
+      case 'new-edge': {
+        const g = state.graphs.find(gr => gr.id === graphId);
+        const n = g?.nodes.find(nd => nd.id === nodeId);
+        if (n) {
+          setEdgeDraft({
+            sourceNodeId: nodeId,
+            sourceGraphId: graphId,
+            cursorX: n.x ?? 0,
+            cursorY: n.y ?? 0,
+          });
+        }
+        break;
+      }
     }
     setContextMenu(null);
   }, [contextMenu, state.graphs, setSource, setSink, removeNode]);
@@ -652,6 +721,20 @@ export default function SandboxCanvas() {
               <path d="M0,-5L10,0L0,5" fill={m.color} />
             </marker>
           ))}
+          {/* Curved edge arrow markers (smaller refX since path is trimmed to node boundary) */}
+          {[
+            { id: 'arrow-curve-default', color: COLORS.edgeDefault },
+            { id: 'arrow-curve-flow', color: COLORS.edgeFlow },
+            { id: 'arrow-curve-full', color: COLORS.edgeFull },
+            { id: 'arrow-curve-path', color: COLORS.edgePath },
+            { id: 'arrow-curve-updating', color: COLORS.edgeUpdating },
+            { id: 'arrow-curve-validation-error', color: COLORS.validationError },
+          ].map(m => (
+            <marker key={m.id} id={m.id} viewBox="0 -5 10 10"
+              refX={10} refY={0} markerWidth={8} markerHeight={8} orient="auto">
+              <path d="M0,-5L10,0L0,5" fill={m.color} />
+            </marker>
+          ))}
           {/* Draft edge arrow */}
           <marker id="arrow-draft" viewBox="0 -5 10 10"
             refX={8} refY={0} markerWidth={8} markerHeight={8} orient="auto">
@@ -699,12 +782,14 @@ export default function SandboxCanvas() {
                   const path = getEdgePath(edge, graph);
                   if (!path) return null;
                   const color = getEdgeColor(edge, graph);
-                  const markerUrl = color === COLORS.edgeUpdating ? 'url(#arrow-updating)'
-                    : color === COLORS.edgePath ? 'url(#arrow-path)'
-                    : color === COLORS.edgeFull ? 'url(#arrow-full)'
-                    : color === COLORS.edgeFlow ? 'url(#arrow-flow)'
-                    : color === COLORS.validationError ? 'url(#arrow-validation-error)'
-                    : 'url(#arrow-default)';
+                  const isCurve = path.type === 'curve';
+                  const prefix = isCurve ? 'arrow-curve' : 'arrow';
+                  const markerUrl = color === COLORS.edgeUpdating ? `url(#${prefix}-updating)`
+                    : color === COLORS.edgePath ? `url(#${prefix}-path)`
+                    : color === COLORS.edgeFull ? `url(#${prefix}-full)`
+                    : color === COLORS.edgeFlow ? `url(#${prefix}-flow)`
+                    : color === COLORS.validationError ? `url(#${prefix}-validation-error)`
+                    : `url(#${prefix}-default)`;
 
                   const isValidationError = color === COLORS.validationError;
                   const strokeWidth = isGenerated && currentStep?.highlights.pathEdges?.includes(edge.id) ? 3.5
@@ -745,73 +830,61 @@ export default function SandboxCanvas() {
                   const pos = getEdgeLabelPos(edge, graph);
                   const color = getEdgeColor(edge, graph);
                   const flow = getEdgeFlow(edge);
-                  const isEditingThis = editingEdge?.graphId === graph.id && editingEdge?.edgeId === edge.id;
+                  const showFull = state.edgeLabelMode === 'full';
+                  const labelText = showFull ? `${flow} / ${edge.capacity}` : `${flow}`;
+                  const isHoveredEdge = hoveredEdge?.graphId === graph.id && hoveredEdge?.edgeId === edge.id;
+                  const labelWidth = showFull ? 48 : 28;
 
                   return (
                     <g key={`label-${edge.id}`}
                       onDoubleClick={e => handleEdgeDoubleClick(e, graph.id, edge.id)}
+                      onMouseEnter={() => setHoveredEdge({ graphId: graph.id, edgeId: edge.id })}
+                      onMouseLeave={() => setHoveredEdge(null)}
                       style={{ cursor: 'pointer' }}
                     >
                       <rect
-                        x={pos.x - 24} y={pos.y - 10}
-                        width={48} height={20}
+                        x={pos.x - labelWidth / 2} y={pos.y - 10}
+                        width={labelWidth} height={20}
                         rx={4} ry={4}
                         fill={COLORS.bg}
                         stroke={COLORS.border}
                         strokeWidth={0.5}
                       />
-                      {isEditingThis ? (
-                        <foreignObject x={pos.x - 24} y={pos.y - 10} width={48} height={20}>
-                          <input
-                            autoFocus
-                            value={editValue}
-                            onChange={e => setEditValue(e.target.value)}
-                            onBlur={commitEdgeEdit}
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') commitEdgeEdit();
-                              if (e.key === 'Escape') setEditingEdge(null);
-                              if (e.key === 'Tab') {
-                                e.preventDefault();
-                                if (editingEdge?.field === 'capacity') {
-                                  commitEdgeEdit();
-                                  const edgeData = graph.edges.find(ed => ed.id === editingEdge.edgeId);
-                                  if (edgeData) {
-                                    setEditingEdge({ ...editingEdge, field: 'flow' });
-                                    setEditValue(String(edgeData.flow));
-                                  }
-                                } else {
-                                  commitEdgeEdit();
-                                }
-                              }
-                            }}
-                            style={{
-                              width: '100%',
-                              height: '100%',
-                              background: COLORS.surface,
-                              color: COLORS.text,
-                              border: `1px solid ${COLORS.blue}`,
-                              borderRadius: 3,
-                              textAlign: 'center',
-                              fontSize: 10,
-                              fontFamily: FONTS.mono,
-                              padding: 0,
-                              outline: 'none',
-                            }}
+                      <text
+                        x={pos.x} y={pos.y}
+                        textAnchor="middle"
+                        dominantBaseline="central"
+                        fill={color !== COLORS.edgeDefault ? color : COLORS.textSecondary}
+                        fontSize={11}
+                        fontFamily={FONTS.mono}
+                        fontWeight={500}
+                        style={{ pointerEvents: 'none' }}
+                      >
+                        {labelText}
+                      </text>
+                      {/* Capacity popover on hover (flow-only mode) */}
+                      {!showFull && isHoveredEdge && (
+                        <>
+                          <rect
+                            x={pos.x - 28} y={pos.y - 30}
+                            width={56} height={18}
+                            rx={4} ry={4}
+                            fill={COLORS.surface}
+                            stroke={COLORS.border}
+                            strokeWidth={0.5}
                           />
-                        </foreignObject>
-                      ) : (
-                        <text
-                          x={pos.x} y={pos.y}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          fill={color !== COLORS.edgeDefault ? color : COLORS.textSecondary}
-                          fontSize={11}
-                          fontFamily={FONTS.mono}
-                          fontWeight={500}
-                          style={{ pointerEvents: 'none' }}
-                        >
-                          {flow} / {edge.capacity}
-                        </text>
+                          <text
+                            x={pos.x} y={pos.y - 21}
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            fill={COLORS.textMuted}
+                            fontSize={9}
+                            fontFamily={FONTS.mono}
+                            style={{ pointerEvents: 'none' }}
+                          >
+                            cap: {edge.capacity}
+                          </text>
+                        </>
                       )}
                     </g>
                   );
@@ -827,7 +900,7 @@ export default function SandboxCanvas() {
                   const fill = getNodeFill(node.id, graph);
                   const stroke = getNodeStroke(node.id, graph);
                   const isEditingThis = editingLabel?.graphId === graph.id && editingLabel?.nodeId === node.id;
-                  const isSelected = selectedNodes.has(node.id);
+                  const isSelected = selectedGraphId === graph.id && selectedNodes.has(node.id);
                   const isHovered = hoveredNode?.graphId === graph.id && hoveredNode?.nodeId === node.id;
                   const isSnapTarget = draftSnapTarget?.nodeId === node.id && edgeDraft?.sourceGraphId === graph.id;
 
@@ -1052,12 +1125,172 @@ export default function SandboxCanvas() {
               </button>
             )}
             <div style={{ height: 1, background: COLORS.border, margin: '4px 0' }} />
+            <button style={menuItemStyle}
+              onMouseEnter={e => (e.currentTarget.style.background = COLORS.surfaceHover)}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              onClick={() => contextMenuAction('new-edge')}>
+              New Edge
+            </button>
+            <div style={{ height: 1, background: COLORS.border, margin: '4px 0' }} />
             <button style={{ ...menuItemStyle, color: COLORS.red }}
               onMouseEnter={e => (e.currentTarget.style.background = COLORS.surfaceHover)}
               onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               onClick={() => contextMenuAction('delete')}>
               Delete Node
             </button>
+          </div>
+        );
+      })()}
+
+      {/* Edge editor popover */}
+      {editingEdge && (() => {
+        const graph = state.graphs.find(g => g.id === editingEdge.graphId);
+        const edge = graph?.edges.find(ed => ed.id === editingEdge.edgeId);
+        if (!graph || !edge) return null;
+
+        const pos = getEdgeLabelPos(edge, graph);
+        const svg = svgRef.current;
+        if (!svg) return null;
+        const transform = d3.zoomTransform(svg);
+        const [sx, sy] = transform.apply([pos.x, pos.y]);
+
+        const sLabel = graph.nodes.find(n => n.id === edge.source)?.label ?? edge.source;
+        const tLabel = graph.nodes.find(n => n.id === edge.target)?.label ?? edge.target;
+
+        const spinnerBtn = {
+          width: 22,
+          height: 22,
+          display: 'flex' as const,
+          alignItems: 'center' as const,
+          justifyContent: 'center' as const,
+          background: COLORS.surfaceHover,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 3,
+          color: COLORS.textSecondary,
+          fontSize: 12,
+          fontFamily: FONTS.mono,
+          cursor: 'pointer' as const,
+          lineHeight: 1,
+        };
+
+        const fieldInput = {
+          width: 52,
+          height: 26,
+          background: COLORS.bg,
+          color: COLORS.text,
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 4,
+          textAlign: 'center' as const,
+          fontSize: 13,
+          fontFamily: FONTS.mono,
+          fontWeight: 500,
+          outline: 'none',
+          padding: 0,
+        };
+
+        return (
+          <div
+            style={{
+              position: 'absolute',
+              left: sx - 100,
+              top: sy + 16,
+              background: COLORS.surface,
+              border: `1px solid ${COLORS.border}`,
+              borderRadius: 10,
+              padding: '12px 16px',
+              width: 200,
+              zIndex: 25,
+              boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+            }}
+            onMouseDown={e => e.stopPropagation()}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              marginBottom: 10,
+            }}>
+              <span style={{ fontSize: 10, fontFamily: FONTS.mono, color: COLORS.textMuted }}>
+                {sLabel} {'->'} {tLabel}
+              </span>
+              <button onClick={closeEdgeEditor} style={{
+                background: 'transparent', border: 'none', color: COLORS.textMuted,
+                cursor: 'pointer', fontSize: 12, padding: '0 2px',
+              }}>x</button>
+            </div>
+
+            {/* Capacity */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 9, fontFamily: FONTS.mono, color: COLORS.textMuted, textTransform: 'uppercase', marginBottom: 4, letterSpacing: '0.06em' }}>
+                Capacity
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button style={spinnerBtn}
+                  onClick={() => updateEdgeCapacity(editingEdge.graphId, editingEdge.edgeId, Math.max(0, edge.capacity - 1))}>
+                  -
+                </button>
+                <input
+                  type="number"
+                  value={edge.capacity}
+                  onChange={e => {
+                    const v = Number(e.target.value);
+                    if (!isNaN(v)) updateEdgeCapacity(editingEdge.graphId, editingEdge.edgeId, v);
+                  }}
+                  style={fieldInput}
+                />
+                <button style={spinnerBtn}
+                  onClick={() => updateEdgeCapacity(editingEdge.graphId, editingEdge.edgeId, edge.capacity + 1)}>
+                  +
+                </button>
+              </div>
+            </div>
+
+            {/* Flow */}
+            <div>
+              <div style={{ fontSize: 9, fontFamily: FONTS.mono, color: COLORS.textMuted, textTransform: 'uppercase', marginBottom: 4, letterSpacing: '0.06em' }}>
+                Flow
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6 }}>
+                <button style={spinnerBtn}
+                  onClick={() => updateEdgeFlow(editingEdge.graphId, editingEdge.edgeId, edge.flow - 1)}>
+                  -
+                </button>
+                <input
+                  type="number"
+                  value={edge.flow}
+                  onChange={e => {
+                    const v = Number(e.target.value);
+                    if (!isNaN(v)) updateEdgeFlow(editingEdge.graphId, editingEdge.edgeId, v);
+                  }}
+                  style={fieldInput}
+                />
+                <button style={spinnerBtn}
+                  onClick={() => updateEdgeFlow(editingEdge.graphId, editingEdge.edgeId, edge.flow + 1)}>
+                  +
+                </button>
+              </div>
+              {/* Flow slider */}
+              <input
+                type="range"
+                min={0}
+                max={edge.capacity > 0 ? edge.capacity : 1}
+                value={edge.flow}
+                onChange={e => updateEdgeFlow(editingEdge.graphId, editingEdge.edgeId, Number(e.target.value))}
+                style={{
+                  width: '100%',
+                  accentColor: COLORS.blue,
+                  height: 4,
+                  cursor: 'pointer',
+                }}
+              />
+              <div style={{
+                display: 'flex', justifyContent: 'space-between',
+                fontSize: 8, fontFamily: FONTS.mono, color: COLORS.textMuted, marginTop: 2,
+              }}>
+                <span>0</span>
+                <span>{edge.capacity}</span>
+              </div>
+            </div>
           </div>
         );
       })()}
@@ -1212,7 +1445,7 @@ export default function SandboxCanvas() {
               ['Double-click node', 'Rename node'],
               ['Double-click edge', 'Edit capacity'],
               ['Right-click node', 'Context menu'],
-              ['Edge mode', 'Drag between nodes'],
+              ['Right-click > New Edge', 'Draw edge to another node'],
               ['Cut mode', 'Draw cut line'],
             ].map(([key, desc]) => (
               <div key={key} style={{ display: 'flex', gap: 8, marginBottom: 3 }}>

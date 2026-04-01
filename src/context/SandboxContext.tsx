@@ -1,6 +1,6 @@
 import { createContext, useContext, useReducer, useCallback, ReactNode } from 'react';
 import { Graph } from '../types/graph';
-import { CanvasMode, ViewLens, Cut } from '../types/sandbox';
+import { CanvasMode, ViewLens, EdgeLabelMode, Cut } from '../types/sandbox';
 import { DEFAULT_GRAPH } from '../engine/defaultGraph';
 import * as utils from '../engine/graphUtils';
 
@@ -9,6 +9,7 @@ interface SandboxState {
   activeGraphId: string | null;
   canvasMode: CanvasMode;
   viewLens: ViewLens;
+  edgeLabelMode: EdgeLabelMode;
   cuts: Cut[];
 }
 
@@ -20,6 +21,7 @@ type Action =
   | { type: 'UPDATE_GRAPH'; graphId: string; updater: (g: Graph) => Graph }
   | { type: 'SET_CANVAS_MODE'; mode: CanvasMode }
   | { type: 'SET_VIEW_LENS'; lens: ViewLens }
+  | { type: 'SET_EDGE_LABEL_MODE'; mode: EdgeLabelMode }
   | { type: 'ADD_CUT'; cut: Cut }
   | { type: 'REMOVE_CUT'; cutId: string }
   | { type: 'LOAD_GRAPH'; graph: Graph };
@@ -71,6 +73,8 @@ function reducer(state: SandboxState, action: Action): SandboxState {
       return { ...state, canvasMode: action.mode };
     case 'SET_VIEW_LENS':
       return { ...state, viewLens: action.lens };
+    case 'SET_EDGE_LABEL_MODE':
+      return { ...state, edgeLabelMode: action.mode };
     case 'ADD_CUT':
       return { ...state, cuts: [...state.cuts, action.cut] };
     case 'REMOVE_CUT':
@@ -95,6 +99,7 @@ const initialState: SandboxState = {
   activeGraphId: initialGraph.id,
   canvasMode: 'select',
   viewLens: 'clean',
+  edgeLabelMode: 'full',
   cuts: [],
 };
 
@@ -117,6 +122,7 @@ interface SandboxContextValue {
   renameGraph: (graphId: string, name: string) => void;
   setCanvasMode: (mode: CanvasMode) => void;
   setViewLens: (lens: ViewLens) => void;
+  setEdgeLabelMode: (mode: EdgeLabelMode) => void;
   addCut: (cut: Cut) => void;
   removeCut: (cutId: string) => void;
   loadGraph: (graph: Graph) => void;
@@ -209,6 +215,10 @@ export function SandboxProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'SET_VIEW_LENS', lens });
   }, []);
 
+  const setEdgeLabelMode = useCallback((mode: EdgeLabelMode) => {
+    dispatch({ type: 'SET_EDGE_LABEL_MODE', mode });
+  }, []);
+
   const addCut = useCallback((cut: Cut) => {
     dispatch({ type: 'ADD_CUT', cut });
   }, []);
@@ -228,7 +238,7 @@ export function SandboxProvider({ children }: { children: ReactNode }) {
       addNode, removeNode, addEdge, removeEdge,
       updateEdgeCapacity, updateEdgeFlow, updateNodePosition, updateNodeLabel,
       setSource, setSink, renameGraph,
-      setCanvasMode, setViewLens, addCut, removeCut, loadGraph,
+      setCanvasMode, setViewLens, setEdgeLabelMode, addCut, removeCut, loadGraph,
     }}>
       {children}
     </SandboxCtx.Provider>
